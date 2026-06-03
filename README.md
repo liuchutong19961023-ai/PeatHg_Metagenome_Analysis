@@ -61,7 +61,7 @@ Relative gene abundance was calculated as:
 
 ## MAG Abundance Estimation
 
-The script `mag_abundance_hgcA_merB.sh` quantifies abundances of dereplicated hgcA-MAGs and merB-MAGs.
+The script `mag_abundance_hgcA_merB.sh` quantifies relative abundances of dereplicated hgcA-MAGs and merB-MAGs.
 
 Workflow:
 
