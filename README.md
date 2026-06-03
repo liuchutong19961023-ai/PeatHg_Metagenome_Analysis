@@ -13,7 +13,7 @@ The repository includes:
 | File                         | Description                                                                                                      |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `gene_relative_abundance.sh` | Pipeline for estimating sequencing-depth-normalized relative abundances of Hg-cycling and nitrogen-cycling genes |
-| `mag_abundance_hgcA_merB.sh` | Pipeline for quantifying hgcA-MAG and merB-MAG abundances using CoverM                                           |
+| `mag_abundance_hgcA_merB.sh` | Pipeline for quantifying hgcA-MAG and merB-MAG relative abundances using CoverM                                  |
 | `code.R`                     | Statistical analyses                                                                                             |
 | `HMM/`                       | HMM profiles used for functional gene identification                                                             |
 
