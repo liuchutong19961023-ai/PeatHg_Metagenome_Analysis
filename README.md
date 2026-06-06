@@ -94,6 +94,7 @@ These profiles were used with HMMER (`hmmsearch`) to identify Hg-cycling and nit
 The script `code.R` contains the statistical analyses used in this study, including:
 
 - Random forest analysis
+- Mixed-effects model analyses with study site included as a random effect
 - Partial least-squares path modeling (PLS-PM)
 - Cross-validation analyses
 - Data visualization
