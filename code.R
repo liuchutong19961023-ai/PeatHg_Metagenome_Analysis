@@ -28,6 +28,168 @@ imp.score <- rp.importance(Total_Random.rf, scale = TRUE)
 write.csv(imp.score, "RFresult.csv")
 
 
+
+# ================================
+# Mixed-effects model analysis
+# hgcA and merB relative abundance
+# Study site included as a random effect
+# ================================
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+
+# ================================
+# Read data
+# ================================
+
+read_gene_file <- function(file, gene_name) {
+  
+  dat <- read.csv(
+    file,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  colnames(dat) <- trimws(colnames(dat))
+  
+  dat %>%
+    dplyr::rename(
+      site = site,
+      abundance = abundance,
+      climate = climate
+    ) %>%
+    dplyr::mutate(
+      gene = gene_name,
+      site = factor(site),
+      
+      climate = factor(
+        climate,
+        levels = c(
+          "Tropic",
+          "Subtropic",
+          "Temperate",
+          "arc"
+        )
+      ),
+      
+      climate_order = as.numeric(climate),
+      abundance = as.numeric(abundance)
+    ) %>%
+    dplyr::filter(
+      !is.na(site),
+      !is.na(climate),
+      !is.na(abundance)
+    )
+}
+
+hgcA_df <- read_gene_file(
+  "hgcA.csv",
+  "hgcA"
+)
+
+merB_df <- read_gene_file(
+  "merB.csv",
+  "merB"
+)
+
+df <- dplyr::bind_rows(
+  hgcA_df,
+  merB_df
+)
+
+# ================================
+# Mixed-effects model
+# abundance ~ climate_order + (1|site)
+# ================================
+
+model_results <- list()
+anova_results <- list()
+
+for (g in unique(df$gene)) {
+  
+  sub_df <- df %>%
+    dplyr::filter(gene == g)
+  
+  model <- lmer(
+    abundance ~ climate_order + (1 | site),
+    data = sub_df
+  )
+  
+  anova_tab <- as.data.frame(
+    anova(model)
+  )
+  
+  anova_tab$Effect <- rownames(anova_tab)
+  anova_tab$Gene <- g
+  
+  anova_results[[g]] <- anova_tab
+  
+  p_value <- anova_tab$`Pr(>F)`[
+    anova_tab$Effect == "climate_order"
+  ]
+  
+  model_results[[g]] <- data.frame(
+    Gene = g,
+    Model = "abundance ~ climate_order + (1 | site)",
+    P_value = p_value,
+    stringsAsFactors = FALSE
+  )
+  
+  sink(
+    paste0(
+      "Mixed_effects_model_summary_",
+      g,
+      ".txt"
+    )
+  )
+  
+  cat("Mixed-effects model\n")
+  cat("Formula: abundance ~ climate_order + (1 | site)\n")
+  cat("Study site was included as a random effect.\n\n")
+  
+  print(summary(model))
+  
+  cat("\nANOVA:\n")
+  print(anova(model))
+  
+  cat("\nRandom effects:\n")
+  print(VarCorr(model))
+  
+  cat("\nSingular fit:\n")
+  print(isSingular(model))
+  
+  sink()
+}
+
+# ================================
+# Export results
+# ================================
+
+p_table <- dplyr::bind_rows(
+  model_results
+)
+
+anova_table <- dplyr::bind_rows(
+  anova_results
+)
+
+write.csv(
+  p_table,
+  "Fig2a_mixed_effects_model_p_values.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  anova_table,
+  "Fig2a_mixed_effects_model_ANOVA.csv",
+  row.names = FALSE
+)
+
+print(p_table)
+
+
+
 # ================================
 # Assessment of climate-associated differences
 # Mixed-effects models with study site included as a random effect
