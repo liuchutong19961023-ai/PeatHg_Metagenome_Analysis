@@ -331,6 +331,578 @@ ggsave(
 
 
 # ================================
+# hgcA and merB MAG phylum composition
+# Mixed-effects Tweedie GLMM with study site included as a random effect
+# Bubble plots of dominant phyla across climate zones
+# ================================
+
+install.packages("tidyverse")
+install.packages("glmmTMB")
+install.packages("emmeans")
+install.packages("ggtext")
+install.packages("multcomp")
+install.packages("patchwork")
+
+library(tidyverse)
+library(glmmTMB)
+library(emmeans)
+library(ggtext)
+library(multcomp)
+library(patchwork)
+
+# ----------------
+# 1. Global parameters
+# ----------------
+
+epsilon <- 1e-6
+pairwise_adjust_method <- "none"
+
+climate_levels <- c("tro", "sub", "tem", "arc")
+
+climate_labels <- c(
+  tro = "Tropic",
+  sub = "Subtropic",
+  tem = "Temperate-boreal",
+  arc = "Arctic"
+)
+
+size_breaks <- c(0, 0.25, 0.50, 0.75, 1.00)
+size_labels <- c("0.00", "0.25", "0.50", "0.75", "1.00")
+
+p_to_sig <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    TRUE ~ ""
+  )
+}
+
+# ----------------
+# 2. Function for one gene
+# ----------------
+
+run_bubble_analysis <- function(
+    mag_file,
+    group_file,
+    gene_name,
+    fill_color,
+    edge_color
+) {
+  
+  # ----------------
+  # Read data
+  # ----------------
+  
+  abund <- read.csv(mag_file, check.names = FALSE)
+  group <- read.csv(group_file, check.names = FALSE)
+  
+  colnames(abund)[1] <- "Phylum"
+  colnames(group) <- c("sample", "site", "group")
+  
+  group <- group %>%
+    dplyr::mutate(
+      sample = as.character(sample),
+      site = factor(site),
+      climate4 = factor(group, levels = climate_levels)
+    )
+  
+  sample_cols <- setdiff(colnames(abund), "Phylum")
+  
+  abund <- abund %>%
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::all_of(sample_cols),
+        ~ as.numeric(.x)
+      )
+    )
+  
+  # ----------------
+  # Sum MAGs to phylum level
+  # ----------------
+  
+  phylum_abund <- abund %>%
+    dplyr::group_by(Phylum) %>%
+    dplyr::summarise(
+      dplyr::across(
+        dplyr::all_of(sample_cols),
+        ~ sum(.x, na.rm = TRUE)
+      ),
+      .groups = "drop"
+    )
+  
+  write.csv(
+    phylum_abund,
+    paste0("01_", gene_name, "_phylum_abundance_sample_matrix.csv"),
+    row.names = FALSE
+  )
+  
+  sample_long <- phylum_abund %>%
+    tidyr::pivot_longer(
+      cols = -Phylum,
+      names_to = "sample",
+      values_to = "abundance"
+    ) %>%
+    dplyr::mutate(
+      sample = as.character(sample),
+      abundance = pmin(pmax(abundance, 0), 1),
+      abundance_tweedie = abundance + epsilon
+    ) %>%
+    dplyr::left_join(group, by = "sample") %>%
+    dplyr::filter(
+      !is.na(site),
+      !is.na(climate4),
+      !is.na(abundance),
+      !is.na(abundance_tweedie)
+    )
+  
+  write.csv(
+    sample_long,
+    paste0("02_", gene_name, "_phylum_sample_level_long_table.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Select Top10 phyla
+  # ----------------
+  
+  top10 <- sample_long %>%
+    dplyr::group_by(Phylum) %>%
+    dplyr::summarise(
+      overall_mean = mean(abundance, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(overall_mean)) %>%
+    dplyr::slice_head(n = 10) %>%
+    dplyr::pull(Phylum)
+  
+  plot_df <- sample_long %>%
+    dplyr::filter(Phylum %in% top10)
+  
+  write.csv(
+    plot_df,
+    paste0("03_", gene_name, "_phylum_top10_model_input.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Run Tweedie GLMM + pairwise letters
+  # ----------------
+  
+  summary_list <- list()
+  pairwise_list <- list()
+  letter_list <- list()
+  
+  for (p in top10) {
+    
+    tmp <- plot_df %>%
+      dplyr::filter(Phylum == p)
+    
+    model4 <- tryCatch(
+      glmmTMB(
+        abundance_tweedie ~ climate4 + (1 | site),
+        data = tmp,
+        family = tweedie(link = "log")
+      ),
+      error = function(e) NULL
+    )
+    
+    climate4_status <- "failed"
+    min_pairwise4_p <- NA_real_
+    n_sig_pairwise4 <- 0L
+    sig_pairwise4_contrasts <- ""
+    pairwise4_sig <- ""
+    pairwise4_is_sig <- FALSE
+    
+    if (!is.null(model4)) {
+      
+      climate4_status <- "success"
+      
+      emm4 <- tryCatch(
+        emmeans(model4, ~ climate4, type = "response"),
+        error = function(e) NULL
+      )
+      
+      pair4 <- NULL
+      letters4 <- NULL
+      
+      if (!is.null(emm4)) {
+        
+        pair4 <- tryCatch(
+          as.data.frame(
+            pairs(emm4, adjust = pairwise_adjust_method)
+          ),
+          error = function(e) NULL
+        )
+        
+        if (!is.null(pair4)) {
+          
+          pair4 <- pair4 %>%
+            dplyr::mutate(
+              Phylum = p,
+              Gene = gene_name,
+              model = "climate4_Tweedie_GLMM",
+              significance = p_to_sig(p.value)
+            )
+          
+          min_pairwise4_p <- min(pair4$p.value, na.rm = TRUE)
+          
+          sig4 <- pair4 %>%
+            dplyr::filter(!is.na(p.value), p.value < 0.05)
+          
+          n_sig_pairwise4 <- nrow(sig4)
+          
+          if (n_sig_pairwise4 > 0) {
+            sig_pairwise4_contrasts <- paste(sig4$contrast, collapse = "; ")
+          }
+          
+          pairwise4_sig <- p_to_sig(min_pairwise4_p)
+          pairwise4_is_sig <- !is.na(min_pairwise4_p) & min_pairwise4_p < 0.05
+          
+          pairwise_list[[p]] <- pair4
+        }
+        
+        letters4 <- tryCatch(
+          as.data.frame(
+            multcomp::cld(
+              emm4,
+              adjust = pairwise_adjust_method,
+              Letters = letters,
+              alpha = 0.05
+            )
+          ),
+          error = function(e) NULL
+        )
+        
+        if (!is.null(letters4)) {
+          letters4 <- letters4 %>%
+            dplyr::mutate(
+              Phylum = p,
+              Gene = gene_name,
+              climate4 = factor(climate4, levels = climate_levels),
+              letter = gsub(" ", "", .group)
+            ) %>%
+            dplyr::select(
+              Gene,
+              Phylum,
+              climate4,
+              letter
+            )
+          
+          letter_list[[p]] <- letters4
+        }
+      }
+      
+      sink(
+        paste0(
+          "04_",
+          gene_name,
+          "_model_climate4_pairwise_letters_",
+          gsub("[/()+ ]", "_", p),
+          ".txt"
+        )
+      )
+      cat("Tweedie GLMM climate4 model for", gene_name, "-", p, "\n")
+      cat("Formula: abundance_tweedie ~ climate4 + (1 | site)\n")
+      cat("Family: tweedie(link = 'log')\n")
+      cat("Study site was included as a random effect.\n\n")
+      print(summary(model4))
+      cat("\nPairwise climate4 comparisons:\n")
+      print(pair4)
+      cat("\nCompact letter display:\n")
+      print(letters4)
+      cat("\nRandom effects:\n")
+      print(VarCorr(model4))
+      sink()
+    }
+    
+    summary_list[[p]] <- data.frame(
+      Gene = gene_name,
+      Phylum = p,
+      min_pairwise4_p = min_pairwise4_p,
+      pairwise4_sig = pairwise4_sig,
+      pairwise4_is_sig = pairwise4_is_sig,
+      n_sig_pairwise4 = n_sig_pairwise4,
+      sig_pairwise4_contrasts = sig_pairwise4_contrasts,
+      climate4_status = climate4_status,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  summary_table <- dplyr::bind_rows(summary_list)
+  pairwise_table <- dplyr::bind_rows(pairwise_list)
+  letter_table <- dplyr::bind_rows(letter_list)
+  
+  write.csv(
+    summary_table,
+    paste0("05_", gene_name, "_Tweedie_climate4_pairwise_summary.csv"),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    pairwise_table,
+    paste0("06_", gene_name, "_Tweedie_climate4_pairwise_results.csv"),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    letter_table,
+    paste0("07_", gene_name, "_Tweedie_climate4_letters.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Bubble plot source
+  # ----------------
+  
+  bubble_df <- plot_df %>%
+    dplyr::group_by(Phylum, climate4) %>%
+    dplyr::summarise(
+      mean_abundance = mean(abundance, na.rm = TRUE),
+      sd_abundance = sd(abundance, na.rm = TRUE),
+      n_sample = dplyr::n(),
+      n_site = dplyr::n_distinct(site),
+      .groups = "drop"
+    ) %>%
+    dplyr::left_join(summary_table, by = "Phylum") %>%
+    dplyr::left_join(letter_table, by = c("Gene", "Phylum", "climate4"))
+  
+  write.csv(
+    bubble_df,
+    paste0("08_", gene_name, "_bubbleplot_pairwise_letters_source.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Order phyla
+  # Top-to-bottom = high-to-low Top10 abundance
+  # ggplot puts first factor level at bottom, so use rev(top10)
+  # ----------------
+  
+  phylum_order <- rev(top10)
+  
+  bubble_df$Phylum <- factor(
+    bubble_df$Phylum,
+    levels = phylum_order
+  )
+  
+  # ----------------
+  # Y-axis labels
+  # ----------------
+  
+  label_table <- summary_table %>%
+    dplyr::mutate(
+      Phylum = factor(Phylum, levels = phylum_order),
+      label = dplyr::case_when(
+        pairwise4_is_sig ~ paste0(
+          "<span style='color:#B22222'><i>",
+          as.character(Phylum),
+          "</i> ",
+          pairwise4_sig,
+          "</span>"
+        ),
+        TRUE ~ paste0("<i>", as.character(Phylum), "</i>")
+      )
+    )
+  
+  label_vec <- label_table$label
+  names(label_vec) <- as.character(label_table$Phylum)
+  
+  # ----------------
+  # Plot
+  # ----------------
+  
+  p <- ggplot(
+    bubble_df,
+    aes(
+      x = climate4,
+      y = Phylum
+    )
+  ) +
+    geom_point(
+      aes(size = mean_abundance),
+      shape = 21,
+      fill = fill_color,
+      color = edge_color,
+      stroke = 0.35,
+      alpha = 0.88
+    ) +
+    geom_text(
+      aes(
+        label = ifelse(pairwise4_is_sig, letter, "")
+      ),
+      vjust = -1.05,
+      size = 3.2,
+      color = "black",
+      na.rm = TRUE
+    ) +
+    scale_x_discrete(labels = climate_labels) +
+    scale_y_discrete(labels = label_vec) +
+    scale_size_continuous(
+      name = "Mean relative abundance",
+      limits = c(0, 1),
+      breaks = size_breaks,
+      labels = size_labels,
+      range = c(1.8, 12)
+    ) +
+    coord_cartesian(clip = "off") +
+    labs(
+      x = NULL,
+      y = NULL,
+      title = gene_name
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      plot.title = element_text(
+        hjust = 0,
+        face = "italic",
+        size = 14
+      ),
+      axis.text.x = element_text(
+        angle = 25,
+        hjust = 1,
+        color = "black",
+        size = 12
+      ),
+      axis.text.y = ggtext::element_markdown(
+        size = 11,
+        color = "black"
+      ),
+      axis.line = element_line(linewidth = 0.5),
+      axis.ticks = element_line(linewidth = 0.5),
+      legend.position = "right",
+      legend.title = element_text(size = 11),
+      legend.text = element_text(size = 10),
+      plot.margin = margin(12, 12, 12, 12)
+    )
+  
+  ggsave(
+    paste0("09_", gene_name, "_bubbleplot_Tweedie_climate4_pairwise_letters.pdf"),
+    p,
+    width = 6.7,
+    height = 5.0
+  )
+  
+  ggsave(
+    paste0("09_", gene_name, "_bubbleplot_Tweedie_climate4_pairwise_letters.png"),
+    p,
+    width = 6.7,
+    height = 5.0,
+    dpi = 600
+  )
+  
+  return(
+    list(
+      plot = p,
+      summary = summary_table,
+      pairwise = pairwise_table,
+      letters = letter_table,
+      bubble_source = bubble_df
+    )
+  )
+}
+
+# ----------------
+# 3. Run hgcA and merB
+# ----------------
+
+res_hgcA <- run_bubble_analysis(
+  mag_file = "hgcAMAGs.csv",
+  group_file = "hgcAgroup.csv",
+  gene_name = "hgcA",
+  fill_color = "#8FB7C9",
+  edge_color = "#3A5661"
+)
+
+res_merB <- run_bubble_analysis(
+  mag_file = "merBMAGs.csv",
+  group_file = "merBgroup.csv",
+  gene_name = "merB",
+  fill_color = "#D9A36A",
+  edge_color = "#6E4A2E"
+)
+
+# ----------------
+# 4. Export combined tables
+# ----------------
+
+all_summary <- dplyr::bind_rows(
+  res_hgcA$summary,
+  res_merB$summary
+)
+
+all_pairwise <- dplyr::bind_rows(
+  res_hgcA$pairwise,
+  res_merB$pairwise
+)
+
+all_letters <- dplyr::bind_rows(
+  res_hgcA$letters,
+  res_merB$letters
+)
+
+all_bubble_source <- dplyr::bind_rows(
+  res_hgcA$bubble_source,
+  res_merB$bubble_source
+)
+
+write.csv(
+  all_summary,
+  "10_hgcA_merB_Tweedie_pairwise_summary_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_pairwise,
+  "11_hgcA_merB_Tweedie_pairwise_results_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_letters,
+  "12_hgcA_merB_Tweedie_letters_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_bubble_source,
+  "13_hgcA_merB_bubbleplot_source_combined.csv",
+  row.names = FALSE
+)
+
+# ----------------
+# 5. Combined figure
+# ----------------
+
+combined_plot <- res_hgcA$plot / res_merB$plot +
+  patchwork::plot_layout(guides = "collect") &
+  theme(
+    legend.position = "right"
+  )
+
+ggsave(
+  "14_hgcA_merB_bubbleplot_Tweedie_pairwise_letters_combined.pdf",
+  combined_plot,
+  width = 7.2,
+  height = 9.6
+)
+
+ggsave(
+  "14_hgcA_merB_bubbleplot_Tweedie_pairwise_letters_combined.png",
+  combined_plot,
+  width = 7.2,
+  height = 9.6,
+  dpi = 600
+)
+
+cat("Finished. hgcA and merB bubble plots were generated with unified bubble-size legends.\n")
+
+
+
+
+
+# ================================
 # PLS-PM analysis
 # Structural equation modeling of climate, nitrogen cycling, and mercury cycling
 # ================================
