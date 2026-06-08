@@ -191,6 +191,663 @@ print(p_table)
 
 
 # ================================
+# hgcA and merB gene-sequence taxonomic composition
+# Climate-associated variation in dominant taxa
+# Tweedie GLMM with study site included as a random effect
+#
+# Input:
+#   hgcA.csv: first column = taxon annotation, remaining columns = sample IDs
+#   merB.csv: first column = taxon annotation, remaining columns = sample IDs
+#   group.csv: site, sample, climate
+#
+# Data processing:
+#   Empty cells are treated as 0
+#   Values are converted to within-sample percentages
+#
+# Model:
+#   relative_abundance_tweedie ~ climate4 + (1 | site)
+#
+# Display:
+#   Four climate zones: tro, sub, tem, arc
+#   Bubble size = mean within-sample relative abundance (%)
+#   Red taxon label = at least one significant pairwise contrast
+#   Letters above bubbles = compact letter display from emmeans
+# ================================
+
+library(tidyverse)
+library(glmmTMB)
+library(emmeans)
+library(ggtext)
+library(multcomp)
+library(patchwork)
+
+# ================================
+# Global parameters
+# ================================
+
+epsilon <- 1e-6
+pairwise_adjust_method <- "none"
+
+climate_levels <- c("tro", "sub", "tem", "arc")
+
+climate_labels <- c(
+  tro = "Tropic",
+  sub = "Subtropic",
+  tem = "Temperate-boreal",
+  arc = "Arctic"
+)
+
+size_breaks <- c(0, 25, 50, 75, 100)
+size_labels <- c("0", "25", "50", "75", "100")
+
+p_to_sig <- function(p) {
+  dplyr::case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    TRUE ~ ""
+  )
+}
+
+# ================================
+# Function for one gene
+# ================================
+
+run_taxon_bubble_analysis <- function(
+    taxon_file,
+    group_file,
+    gene_name,
+    fill_color,
+    edge_color
+) {
+  
+  # ----------------
+  # Read data
+  # ----------------
+  
+  taxon_raw <- read.csv(
+    taxon_file,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  group <- read.csv(
+    group_file,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  colnames(taxon_raw) <- trimws(colnames(taxon_raw))
+  colnames(group) <- trimws(colnames(group))
+  
+  colnames(taxon_raw)[1] <- "Taxon"
+  colnames(group) <- c("site", "sample", "climate")
+  
+  group <- group %>%
+    dplyr::mutate(
+      site = factor(site),
+      sample = as.character(sample),
+      climate4 = factor(climate, levels = climate_levels)
+    )
+  
+  sample_cols <- setdiff(colnames(taxon_raw), "Taxon")
+  
+  # ----------------
+  # Empty cells are treated as 0
+  # ----------------
+  
+  taxon_raw <- taxon_raw %>%
+    dplyr::mutate(
+      Taxon = as.character(Taxon),
+      dplyr::across(
+        dplyr::all_of(sample_cols),
+        ~ as.numeric(dplyr::na_if(as.character(.x), ""))
+      )
+    ) %>%
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::all_of(sample_cols),
+        ~ tidyr::replace_na(.x, 0)
+      )
+    )
+  
+  write.csv(
+    taxon_raw,
+    paste0("01_", gene_name, "_taxon_abundance_empty_as_zero.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Sum duplicated taxon annotations if present
+  # ----------------
+  
+  taxon_sum <- taxon_raw %>%
+    dplyr::group_by(Taxon) %>%
+    dplyr::summarise(
+      dplyr::across(
+        dplyr::all_of(sample_cols),
+        ~ sum(.x, na.rm = TRUE)
+      ),
+      .groups = "drop"
+    )
+  
+  write.csv(
+    taxon_sum,
+    paste0("02_", gene_name, "_taxon_abundance_sample_matrix.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Within-sample percentage normalization
+  # Each sample column sums to 100 if total abundance > 0
+  # ----------------
+  
+  sample_totals <- colSums(
+    taxon_sum[, sample_cols, drop = FALSE],
+    na.rm = TRUE
+  )
+  
+  taxon_percent <- taxon_sum
+  
+  for (s in sample_cols) {
+    if (!is.na(sample_totals[s]) && sample_totals[s] > 0) {
+      taxon_percent[[s]] <- taxon_sum[[s]] / sample_totals[s] * 100
+    } else {
+      taxon_percent[[s]] <- 0
+    }
+  }
+  
+  write.csv(
+    taxon_percent,
+    paste0("03_", gene_name, "_taxon_within_sample_relative_abundance_percent.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Long table
+  # ----------------
+  
+  sample_long <- taxon_percent %>%
+    tidyr::pivot_longer(
+      cols = -Taxon,
+      names_to = "sample",
+      values_to = "relative_abundance"
+    ) %>%
+    dplyr::mutate(
+      sample = as.character(sample),
+      relative_abundance = as.numeric(relative_abundance),
+      relative_abundance = pmin(pmax(relative_abundance, 0), 100),
+      relative_abundance_tweedie = relative_abundance + epsilon
+    ) %>%
+    dplyr::left_join(group, by = "sample") %>%
+    dplyr::filter(
+      !is.na(site),
+      !is.na(climate4),
+      !is.na(relative_abundance),
+      !is.na(relative_abundance_tweedie)
+    )
+  
+  write.csv(
+    sample_long,
+    paste0("04_", gene_name, "_taxon_sample_level_long_table.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Select Top10 taxa based on overall mean relative abundance
+  # ----------------
+  
+  top10 <- sample_long %>%
+    dplyr::group_by(Taxon) %>%
+    dplyr::summarise(
+      overall_mean = mean(relative_abundance, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(overall_mean)) %>%
+    dplyr::slice_head(n = 10) %>%
+    dplyr::pull(Taxon)
+  
+  plot_df <- sample_long %>%
+    dplyr::filter(Taxon %in% top10)
+  
+  write.csv(
+    plot_df,
+    paste0("05_", gene_name, "_taxon_top10_model_input.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Run Tweedie GLMM + pairwise letters
+  # ----------------
+  
+  summary_list <- list()
+  pairwise_list <- list()
+  letter_list <- list()
+  
+  for (taxon_i in top10) {
+    
+    tmp <- plot_df %>%
+      dplyr::filter(Taxon == taxon_i)
+    
+    model4 <- tryCatch(
+      glmmTMB(
+        relative_abundance_tweedie ~ climate4 + (1 | site),
+        data = tmp,
+        family = tweedie(link = "log")
+      ),
+      error = function(e) NULL
+    )
+    
+    climate4_status <- "failed"
+    min_pairwise4_p <- NA_real_
+    n_sig_pairwise4 <- 0L
+    sig_pairwise4_contrasts <- ""
+    pairwise4_sig <- ""
+    pairwise4_is_sig <- FALSE
+    
+    if (!is.null(model4)) {
+      
+      climate4_status <- "success"
+      
+      emm4 <- tryCatch(
+        emmeans(model4, ~ climate4, type = "response"),
+        error = function(e) NULL
+      )
+      
+      pair4 <- NULL
+      letters4 <- NULL
+      
+      if (!is.null(emm4)) {
+        
+        pair4 <- tryCatch(
+          as.data.frame(
+            pairs(emm4, adjust = pairwise_adjust_method)
+          ),
+          error = function(e) NULL
+        )
+        
+        if (!is.null(pair4)) {
+          
+          pair4 <- pair4 %>%
+            dplyr::mutate(
+              Taxon = taxon_i,
+              Gene = gene_name,
+              model = "climate4_Tweedie_GLMM",
+              significance = p_to_sig(p.value)
+            )
+          
+          min_pairwise4_p <- min(pair4$p.value, na.rm = TRUE)
+          
+          sig4 <- pair4 %>%
+            dplyr::filter(!is.na(p.value), p.value < 0.05)
+          
+          n_sig_pairwise4 <- nrow(sig4)
+          
+          if (n_sig_pairwise4 > 0) {
+            sig_pairwise4_contrasts <- paste(sig4$contrast, collapse = "; ")
+          }
+          
+          pairwise4_sig <- p_to_sig(min_pairwise4_p)
+          pairwise4_is_sig <- !is.na(min_pairwise4_p) & min_pairwise4_p < 0.05
+          
+          pairwise_list[[taxon_i]] <- pair4
+        }
+        
+        letters4 <- tryCatch(
+          as.data.frame(
+            multcomp::cld(
+              emm4,
+              adjust = pairwise_adjust_method,
+              Letters = letters,
+              alpha = 0.05
+            )
+          ),
+          error = function(e) NULL
+        )
+        
+        if (!is.null(letters4)) {
+          letters4 <- letters4 %>%
+            dplyr::mutate(
+              Taxon = taxon_i,
+              Gene = gene_name,
+              climate4 = factor(climate4, levels = climate_levels),
+              letter = gsub(" ", "", .group)
+            ) %>%
+            dplyr::select(
+              Gene,
+              Taxon,
+              climate4,
+              letter
+            )
+          
+          letter_list[[taxon_i]] <- letters4
+        }
+      }
+      
+      sink(
+        paste0(
+          "06_",
+          gene_name,
+          "_model_climate4_pairwise_letters_",
+          gsub("[/()+ ]", "_", taxon_i),
+          ".txt"
+        )
+      )
+      
+      cat("Tweedie GLMM climate4 model for", gene_name, "-", taxon_i, "\n")
+      cat("Formula: relative_abundance_tweedie ~ climate4 + (1 | site)\n")
+      cat("Family: tweedie(link = 'log')\n")
+      cat("Study site was included as a random effect.\n\n")
+      print(summary(model4))
+      cat("\nPairwise climate4 comparisons:\n")
+      print(pair4)
+      cat("\nCompact letter display:\n")
+      print(letters4)
+      cat("\nRandom effects:\n")
+      print(VarCorr(model4))
+      sink()
+    }
+    
+    summary_list[[taxon_i]] <- data.frame(
+      Gene = gene_name,
+      Taxon = taxon_i,
+      min_pairwise4_p = min_pairwise4_p,
+      pairwise4_sig = pairwise4_sig,
+      pairwise4_is_sig = pairwise4_is_sig,
+      n_sig_pairwise4 = n_sig_pairwise4,
+      sig_pairwise4_contrasts = sig_pairwise4_contrasts,
+      climate4_status = climate4_status,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  summary_table <- dplyr::bind_rows(summary_list)
+  pairwise_table <- dplyr::bind_rows(pairwise_list)
+  letter_table <- dplyr::bind_rows(letter_list)
+  
+  write.csv(
+    summary_table,
+    paste0("07_", gene_name, "_Tweedie_climate4_pairwise_summary.csv"),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    pairwise_table,
+    paste0("08_", gene_name, "_Tweedie_climate4_pairwise_results.csv"),
+    row.names = FALSE
+  )
+  
+  write.csv(
+    letter_table,
+    paste0("09_", gene_name, "_Tweedie_climate4_letters.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Bubble plot source
+  # ----------------
+  
+  bubble_df <- plot_df %>%
+    dplyr::group_by(Taxon, climate4) %>%
+    dplyr::summarise(
+      mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+      sd_relative_abundance = sd(relative_abundance, na.rm = TRUE),
+      n_sample = dplyr::n(),
+      n_site = dplyr::n_distinct(site),
+      .groups = "drop"
+    ) %>%
+    dplyr::left_join(summary_table, by = "Taxon") %>%
+    dplyr::left_join(letter_table, by = c("Gene", "Taxon", "climate4"))
+  
+  write.csv(
+    bubble_df,
+    paste0("10_", gene_name, "_bubbleplot_pairwise_letters_source.csv"),
+    row.names = FALSE
+  )
+  
+  # ----------------
+  # Order taxa
+  # Top-to-bottom = high-to-low Top10 relative abundance
+  # ggplot puts first factor level at bottom, so use rev(top10)
+  # ----------------
+  
+  taxon_order <- rev(top10)
+  
+  bubble_df$Taxon <- factor(
+    bubble_df$Taxon,
+    levels = taxon_order
+  )
+  
+  # ----------------
+  # Y-axis labels
+  # ----------------
+  
+  label_table <- summary_table %>%
+    dplyr::mutate(
+      Taxon = factor(Taxon, levels = taxon_order),
+      label = dplyr::case_when(
+        pairwise4_is_sig ~ paste0(
+          "<span style='color:#B22222'><i>",
+          as.character(Taxon),
+          "</i> ",
+          pairwise4_sig,
+          "</span>"
+        ),
+        TRUE ~ paste0("<i>", as.character(Taxon), "</i>")
+      )
+    )
+  
+  label_vec <- label_table$label
+  names(label_vec) <- as.character(label_table$Taxon)
+  
+  # ----------------
+  # Plot
+  # ----------------
+  
+  p <- ggplot(
+    bubble_df,
+    aes(
+      x = climate4,
+      y = Taxon
+    )
+  ) +
+    geom_point(
+      aes(size = mean_relative_abundance),
+      shape = 21,
+      fill = fill_color,
+      color = edge_color,
+      stroke = 0.35,
+      alpha = 0.88
+    ) +
+    geom_text(
+      aes(
+        label = ifelse(pairwise4_is_sig, letter, "")
+      ),
+      vjust = -1.05,
+      size = 3.2,
+      color = "black",
+      na.rm = TRUE
+    ) +
+    scale_x_discrete(labels = climate_labels) +
+    scale_y_discrete(labels = label_vec) +
+    scale_size_continuous(
+      name = "Mean relative abundance (%)",
+      limits = c(0, 100),
+      breaks = size_breaks,
+      labels = size_labels,
+      range = c(1.8, 12)
+    ) +
+    coord_cartesian(clip = "off") +
+    labs(
+      x = NULL,
+      y = NULL,
+      title = gene_name
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      plot.title = element_text(
+        hjust = 0,
+        face = "italic",
+        size = 14
+      ),
+      axis.text.x = element_text(
+        angle = 25,
+        hjust = 1,
+        color = "black",
+        size = 12
+      ),
+      axis.text.y = ggtext::element_markdown(
+        size = 11,
+        color = "black"
+      ),
+      axis.line = element_line(linewidth = 0.5),
+      axis.ticks = element_line(linewidth = 0.5),
+      legend.position = "right",
+      legend.title = element_text(size = 11),
+      legend.text = element_text(size = 10),
+      plot.margin = margin(12, 12, 12, 12)
+    )
+  
+  ggsave(
+    paste0("11_", gene_name, "_taxon_bubbleplot_Tweedie_climate4_pairwise_letters.pdf"),
+    p,
+    width = 6.7,
+    height = 5.0
+  )
+  
+  ggsave(
+    paste0("11_", gene_name, "_taxon_bubbleplot_Tweedie_climate4_pairwise_letters.png"),
+    p,
+    width = 6.7,
+    height = 5.0,
+    dpi = 600
+  )
+  
+  return(
+    list(
+      plot = p,
+      summary = summary_table,
+      pairwise = pairwise_table,
+      letters = letter_table,
+      bubble_source = bubble_df,
+      percent_matrix = taxon_percent,
+      long_table = sample_long
+    )
+  )
+}
+
+# ================================
+# Run hgcA and merB
+# ================================
+
+res_hgcA <- run_taxon_bubble_analysis(
+  taxon_file = "hgcA.csv",
+  group_file = "group.csv",
+  gene_name = "hgcA",
+  fill_color = "#8FB7C9",
+  edge_color = "#3A5661"
+)
+
+res_merB <- run_taxon_bubble_analysis(
+  taxon_file = "merB.csv",
+  group_file = "group.csv",
+  gene_name = "merB",
+  fill_color = "#D9A36A",
+  edge_color = "#6E4A2E"
+)
+
+# ================================
+# Export combined tables
+# ================================
+
+all_summary <- dplyr::bind_rows(
+  res_hgcA$summary,
+  res_merB$summary
+)
+
+all_pairwise <- dplyr::bind_rows(
+  res_hgcA$pairwise,
+  res_merB$pairwise
+)
+
+all_letters <- dplyr::bind_rows(
+  res_hgcA$letters,
+  res_merB$letters
+)
+
+all_bubble_source <- dplyr::bind_rows(
+  res_hgcA$bubble_source,
+  res_merB$bubble_source
+)
+
+all_long_table <- dplyr::bind_rows(
+  res_hgcA$long_table,
+  res_merB$long_table
+)
+
+write.csv(
+  all_summary,
+  "12_hgcA_merB_gene_sequence_Tweedie_pairwise_summary_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_pairwise,
+  "13_hgcA_merB_gene_sequence_Tweedie_pairwise_results_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_letters,
+  "14_hgcA_merB_gene_sequence_Tweedie_letters_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_bubble_source,
+  "15_hgcA_merB_gene_sequence_bubbleplot_source_combined.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  all_long_table,
+  "16_hgcA_merB_gene_sequence_relative_abundance_long_table_combined.csv",
+  row.names = FALSE
+)
+
+# ================================
+# Combined figure
+# ================================
+
+combined_plot <- res_hgcA$plot / res_merB$plot +
+  patchwork::plot_layout(guides = "collect") &
+  theme(
+    legend.position = "right"
+  )
+
+ggsave(
+  "17_hgcA_merB_gene_sequence_taxon_bubbleplot_Tweedie_pairwise_letters_combined.pdf",
+  combined_plot,
+  width = 7.2,
+  height = 9.6
+)
+
+ggsave(
+  "17_hgcA_merB_gene_sequence_taxon_bubbleplot_Tweedie_pairwise_letters_combined.png",
+  combined_plot,
+  width = 7.2,
+  height = 9.6,
+  dpi = 600
+)
+
+cat("Finished. hgcA and merB gene-sequence taxonomic bubble plots were generated.\n")
+
+
+
+
+
+# ================================
 # Assessment of climate-associated differences
 # Mixed-effects models with study site included as a random effect
 # Boxplots of TN and nitrogen-cycling ratios
