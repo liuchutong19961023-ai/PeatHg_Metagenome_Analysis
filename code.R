@@ -30,6 +30,398 @@ write.csv(imp.score, "RFresult.csv")
 
 
 # ================================
+# Assessment of climate-associated trends in %MeHg
+# Ordered climate-gradient mixed-effects model
+# Study site included as a random effect
+# Estimated marginal means and 95% confidence intervals
+# ================================
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+
+# ----------------
+# 1. Read data
+# ----------------
+
+df <- read.csv("MeHg.csv", check.names = FALSE)
+colnames(df) <- trimws(colnames(df))
+
+df <- df %>%
+  dplyr::rename(
+    Site = site,
+    MeHg = `%MeHg`,
+    climate = climate
+  ) %>%
+  dplyr::mutate(
+    Site = factor(Site),
+    
+    climate = tolower(trimws(climate)),
+    
+    climate = dplyr::case_when(
+      climate %in% c("tro", "tropic", "tropical") ~ "tro",
+      climate %in% c("sub", "subtropic", "subtropical") ~ "sub",
+      climate %in% c("tem", "temperate", "temperate-boreal",
+                     "temperate_boreal") ~ "tem",
+      climate %in% c("arc", "arctic") ~ "arc",
+      TRUE ~ climate
+    ),
+    
+    climate = factor(
+      climate,
+      levels = c("tro", "sub", "tem", "arc")
+    ),
+    
+    climate_order = dplyr::case_when(
+      climate == "sub" ~ 1,
+      climate == "tem" ~ 2,
+      climate == "arc" ~ 3,
+      TRUE ~ NA_real_
+    ),
+    
+    MeHg = as.numeric(MeHg)
+  ) %>%
+  dplyr::filter(
+    !is.na(Site),
+    !is.na(climate),
+    !is.na(MeHg)
+  )
+
+write.csv(
+  df,
+  "MeHg_cleaned_data.csv",
+  row.names = FALSE
+)
+
+# ----------------
+# 2. Ordered climate-gradient mixed-effects model
+# Tropic excluded because no %MeHg data are available
+# ----------------
+
+df_model <- df %>%
+  dplyr::filter(!is.na(climate_order))
+
+model_ord <- lmer(
+  MeHg ~ climate_order + (1 | Site),
+  data = df_model
+)
+
+anova_ord <- anova(model_ord)
+
+write.csv(
+  as.data.frame(anova_ord),
+  "MeHg_ordered_gradient_LMM_ANOVA.csv",
+  row.names = FALSE
+)
+
+sink("MeHg_ordered_gradient_LMM_summary.txt")
+
+cat(
+  "Ordered climate-gradient mixed-effects model\n\n"
+)
+
+cat(
+  "Formula: MeHg ~ climate_order + (1 | Site)\n\n"
+)
+
+cat(
+  "climate_order:\n",
+  "sub = 1\n",
+  "tem = 2\n",
+  "arc = 3\n\n"
+)
+
+print(summary(model_ord))
+
+cat("\nANOVA:\n")
+print(anova_ord)
+
+cat("\nRandom effects:\n")
+print(VarCorr(model_ord))
+
+cat("\nSingular fit:\n")
+print(isSingular(model_ord))
+
+sink()
+
+# ----------------
+# 3. Estimated marginal means and 95% confidence intervals
+# ----------------
+
+emm <- emmeans(
+  model_ord,
+  ~ climate_order,
+  at = list(climate_order = c(1, 2, 3))
+)
+
+emm_df <- as.data.frame(emm) %>%
+  dplyr::mutate(
+    climate_order = as.numeric(climate_order),
+    
+    climate = dplyr::case_when(
+      climate_order == 1 ~ "sub",
+      climate_order == 2 ~ "tem",
+      climate_order == 3 ~ "arc"
+    ),
+    
+    climate = factor(
+      climate,
+      levels = c("tro", "sub", "tem", "arc")
+    )
+  )
+
+write.csv(
+  emm_df,
+  "MeHg_ordered_gradient_LMM_emmeans.csv",
+  row.names = FALSE
+)
+
+# ----------------
+# 4. Site counts
+# ----------------
+
+n_df <- df_model %>%
+  dplyr::group_by(climate) %>%
+  dplyr::summarise(
+    n_measurement = dplyr::n(),
+    n_site = dplyr::n_distinct(Site),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    climate = factor(
+      climate,
+      levels = c("tro", "sub", "tem", "arc")
+    )
+  )
+
+write.csv(
+  n_df,
+  "MeHg_site_counts.csv",
+  row.names = FALSE
+)
+
+plot_df <- emm_df %>%
+  dplyr::left_join(
+    n_df,
+    by = "climate"
+  )
+
+# ----------------
+# 5. Format P value
+# ----------------
+
+p_order <- as.data.frame(anova_ord)$`Pr(>F)`[1]
+
+format_p <- function(p) {
+  
+  if (is.na(p)) {
+    
+    return("P = NA")
+    
+  } else if (p < 0.001) {
+    
+    return("P < 0.001")
+    
+  } else {
+    
+    return(
+      paste0(
+        "P = ",
+        sprintf("%.3f", p)
+      )
+    )
+  }
+}
+
+p_label <- paste0(
+  "Ordered climate-gradient\n",
+  "mixed-effects model\n",
+  format_p(p_order)
+)
+
+# ----------------
+# 6. Add empty tropic slot
+# ----------------
+
+tropic_row <- data.frame(
+  climate_order = NA_real_,
+  emmean = NA_real_,
+  SE = NA_real_,
+  df = NA_real_,
+  lower.CL = NA_real_,
+  upper.CL = NA_real_,
+  climate = factor(
+    "tro",
+    levels = c("tro", "sub", "tem", "arc")
+  ),
+  n_measurement = NA_integer_,
+  n_site = NA_integer_
+)
+
+plot_df_full <- dplyr::bind_rows(
+  tropic_row,
+  plot_df
+)
+
+write.csv(
+  plot_df_full,
+  "MeHg_plot_source_data.csv",
+  row.names = FALSE
+)
+
+# ------------------------
+# 7. Colors and labels
+# ------------------------
+
+climate_cols <- c(
+  tro = "#D9D9D9",
+  sub = "#AFC1CC",
+  tem = "#F2B866",
+  arc = "#E63735"
+)
+
+climate_labels <- c(
+  tro = "Tropic",
+  sub = "Subtropic",
+  tem = "Temperate-boreal",
+  arc = "Arctic"
+)
+
+# ------------------------
+# 8. Plot
+# ------------------------
+
+ymax <- max(
+  plot_df_full$upper.CL,
+  na.rm = TRUE
+)
+
+p <- ggplot(
+  plot_df_full,
+  aes(
+    x = climate,
+    y = emmean,
+    fill = climate
+  )
+) +
+  geom_col(
+    data = plot_df_full %>% dplyr::filter(climate != "tro"),
+    width = 0.72,
+    color = "black",
+    linewidth = 0.35
+  ) +
+  geom_errorbar(
+    data = plot_df_full %>% dplyr::filter(climate != "tro"),
+    aes(
+      ymin = lower.CL,
+      ymax = upper.CL
+    ),
+    width = 0.13,
+    linewidth = 0.35
+  ) +
+  geom_text(
+    data = plot_df_full %>% dplyr::filter(climate != "tro"),
+    aes(
+      y = emmean * 0.45,
+      label = paste0("n = ", n_site)
+    ),
+    size = 4,
+    fontface = "bold"
+  ) +
+  annotate(
+    "text",
+    x = 1,
+    y = ymax * 0.18,
+    label = "No data\navailable",
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  annotate(
+    "text",
+    x = 2.65,
+    y = ymax * 1.10,
+    label = p_label,
+    size = 3.6,
+    fontface = "italic",
+    hjust = 0.5
+  ) +
+  scale_fill_manual(
+    values = climate_cols,
+    drop = FALSE
+  ) +
+  scale_x_discrete(
+    labels = climate_labels,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    name = "%MeHg",
+    expand = expansion(mult = c(0, 0.18))
+  ) +
+  labs(
+    x = NULL
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    
+    axis.text.x = element_text(
+      angle = 25,
+      hjust = 1,
+      color = "black"
+    ),
+    
+    axis.text.y = element_text(
+      color = "black"
+    ),
+    
+    axis.title.y = element_text(
+      color = "black"
+    ),
+    
+    axis.line = element_line(
+      color = "black",
+      linewidth = 0.35
+    ),
+    
+    axis.ticks = element_line(
+      color = "black",
+      linewidth = 0.35
+    ),
+    
+    plot.margin = ggplot2::margin(
+      t = 8,
+      r = 10,
+      b = 8,
+      l = 8
+    )
+  )
+
+# ------------------------
+# 9. Export
+# ------------------------
+
+ggsave(
+  "MeHg_ordered_LMM_emmean_95CI_barplot.pdf",
+  p,
+  width = 5.8,
+  height = 4.2
+)
+
+ggsave(
+  "MeHg_ordered_LMM_emmean_95CI_barplot.png",
+  p,
+  width = 5.8,
+  height = 4.2,
+  dpi = 600
+)
+
+cat("Finished. Ordered-gradient LMM emmean + 95% CI barplot exported.\n")
+
+
+
+
+# ================================
 # Mixed-effects model analysis
 # hgcA and merB relative abundance
 # Study site included as a random effect
