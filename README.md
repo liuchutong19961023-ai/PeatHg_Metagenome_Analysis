@@ -54,7 +54,7 @@ The following functional genes were analyzed:
 
 Relative gene abundance was calculated as:
 
-[(Total gene coverage / Total reads) × 10^6]
+[(Mean gene coverage / Total reads) × 10^6]
 
 
 ---
